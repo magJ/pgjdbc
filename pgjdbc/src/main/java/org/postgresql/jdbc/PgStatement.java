@@ -210,13 +210,13 @@ public class PgStatement implements Statement, BaseStatement {
     }
 
     @Override
-    public void handleWarning(SQLWarning warning) {
-      PgStatement.this.addWarning(warning);
+    public void handleCommandStatus(String status, int updateCount, long insertOID) {
+      append(new ResultWrapper(updateCount, insertOID));
     }
 
     @Override
-    public void handleCommandStatus(String status, int updateCount, long insertOID) {
-      append(new ResultWrapper(updateCount, insertOID));
+    public void handleWarning(SQLWarning warning) {
+      PgStatement.this.addWarning(warning);
     }
 
   }
@@ -539,14 +539,20 @@ public class PgStatement implements Statement, BaseStatement {
    * @param warn warning to add
    */
   public void addWarning(SQLWarning warn) {
+    warningCount++;
     //copy reference to avoid NPE from concurrent modification of this.warnings
     final PGSQLWarningWrapper warnWrap = this.warnings;
+    if(warningCount == 6 ){
+      while(!sixthWait);
+    }
     if (warnWrap == null) {
       this.warnings = new PGSQLWarningWrapper(warn);
     } else {
       warnWrap.addWarning(warn);
     }
   }
+  int warningCount = 0;
+  public static volatile boolean sixthWait = false;
 
   public SQLWarning getWarnings() throws SQLException {
     checkClosed();

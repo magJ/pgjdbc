@@ -436,27 +436,26 @@ public class StatementTest {
                 + "LANGUAGE plpgsql;");
     con.createStatement().execute("SET SESSION client_min_messages = 'NOTICE'");
     final PreparedStatement preparedStatement = con.prepareStatement("SELECT notify_then_sleep()");
-    final AtomicReference<SQLWarning> warning = new AtomicReference<SQLWarning>();
     ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1);
-    ScheduledFuture<?> future = executorService.schedule(new Runnable() {
+    ScheduledFuture<SQLWarning> future = executorService.schedule(new Callable<SQLWarning>() {
       @Override
-      public void run() {
-        try {
-          warning.set(preparedStatement.getWarnings());
-        } catch (SQLException e) {
-          fail("Exception thrown: " + e.getMessage());
-        }
+      public SQLWarning call() throws SQLException {
+        return preparedStatement.getWarnings();
       }
     }, 1000, TimeUnit.MILLISECONDS);
     preparedStatement.execute();
 
-    future.get();
+    SQLWarning warning = future.get();
     executorService.shutdown();
 
-    assertNotNull(warning.get());
-    assertEquals(warning.get().getMessage(), "Test 1");
-    assertEquals(warning.get().getNextWarning().getMessage(), "Test 2");
+    assertNotNull(warning);
+    assertEquals("First warning received not first notice raised",
+        warning.getMessage(), "Test 1");
+    assertEquals("Second warning received not second notice raised",
+        warning.getNextWarning().getMessage(), "Test 2");
   }
+
+
 
   /**
    * Demonstrates a safe approach to concurrently reading the latest
@@ -469,6 +468,7 @@ public class StatementTest {
   @Test
   public void testConcurrentWarningReadAndClear()
       throws SQLException, InterruptedException, ExecutionException, TimeoutException {
+    PgStatement.sixthWait = false;
     final int iterations = 1000;
     final ExecutorService executor = Executors.newSingleThreadExecutor();
     final PgStatement statement = (PgStatement) con.createStatement();
@@ -481,20 +481,34 @@ public class StatementTest {
         //ends after the statement finishes execution
         while (warnings < iterations) {
           //if next linked warning has value use that, otherwise check latest head
-          final SQLWarning warn = lastProcessed != null && lastProcessed.getNextWarning() != null
-              ? lastProcessed.getNextWarning()
-              : statement.getWarnings();
+          final SQLWarning warn;
+          if (lastProcessed != null && lastProcessed.getNextWarning() != null) {
+            warn = lastProcessed.getNextWarning();
+          } else {
+            if (warnings == 5) {
+              System.out.println("Sixth");
+              PgStatement.sixthWait = true;
+              Thread.sleep(100);
+            }
+            warn = statement.getWarnings();
+            //if the producer thread got in and added some warnings between
+            //the check and assignment, then start over so that we dont miss any warnings
+            if(lastProcessed != null && lastProcessed.getNextWarning() != null) {
+              //continue;
+            }
+          }
           if (warn != null) {
             warnings++;
-            //System.out.println("Processing " + warn.getMessage());
+            System.out.println("Processing " + warn.getMessage());
             lastProcessed = warn;
             if (warn == statement.getWarnings()) {
-              //System.out.println("Clearing warnings");
+              System.out.println("Clearing warnings");
               statement.clearWarnings();
             }
           } else {
             //Not required for this test, but a good idea adding some delay for production code
             //to avoid high cpu usage while the query is running and no warnings are coming in.
+            //Alternatively use JDK9's Thread.onSpinWait()
             Thread.sleep(10);
           }
         }
@@ -505,9 +519,10 @@ public class StatementTest {
     });
 
     for (int i = 0; i < iterations; i++) {
+
       statement.addWarning(new SQLWarning("Warning " + i));
       if (i % 33 == 0 ) {
-        Thread.sleep(1);//Add some delay every few records to simulate IO
+        //Thread.sleep(1);//Add some delay every few records to simulate IO
       }
     }
     //If the reader doesn't return after 2 seconds, it failed.
